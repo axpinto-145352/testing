@@ -1,0 +1,180 @@
+{
+  "name": "Gap Analysis - Form Submission Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "gap-analysis/submit",
+        "authentication": "headerAuth",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Survey Submission Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "gap-analysis-submit",
+      "notes": "Receives form submissions. Auth via API key header for security."
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\n\n// Validate required fields\nconst required = ['username', 'surveyId', 'submissionType'];\nfor (const field of required) {\n  if (!body[field]) {\n    throw new Error(`Missing required field: ${field}`);\n  }\n}\n\n// Sanitize inputs - strip any HTML/script tags\nfunction sanitize(val) {\n  if (typeof val === 'string') {\n    return val.replace(/<[^>]*>/g, '').trim();\n  }\n  return val;\n}\n\nconst sanitized = {};\nfor (const [key, value] of Object.entries(body)) {\n  if (typeof value === 'object' && !Array.isArray(value)) {\n    sanitized[key] = {};\n    for (const [k, v] of Object.entries(value)) {\n      sanitized[key][k] = sanitize(v);\n    }\n  } else {\n    sanitized[key] = sanitize(value);\n  }\n}\n\nsanitized.timestamp = new Date().toISOString();\nsanitized.ipHash = require('crypto').createHash('sha256').update($input.first().json.headers['x-forwarded-for'] || 'unknown').digest('hex').substring(0, 16);\n\nreturn [{ json: sanitized }];"
+      },
+      "id": "validate-sanitize",
+      "name": "Validate & Sanitize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [250, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.submissionType }}",
+              "rightValue": "demographics",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "route-submission-type",
+      "name": "Demographics or Survey?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [500, 0]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": "={{ $env.DEMOGRAPHICS_SHEET_ID }}",
+        "sheetName": "Demographics",
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        }
+      },
+      "id": "store-demographics",
+      "name": "Store Demographics",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [750, -100],
+      "notes": "Demographics: username, experience_years, org_type (contractor/FBI/federal/military), current_status (active_duty/contractor/federal), sub_working_group, affiliations, skill_sets"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": "={{ $env.MASTER_ROSTER_SHEET_ID }}",
+        "sheetName": "Roster",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "demographicsComplete": "YES",
+            "demographicsDate": "={{ $json.timestamp }}"
+          }
+        },
+        "matchingColumns": ["username"]
+      },
+      "id": "update-roster-demographics",
+      "name": "Mark Demographics Complete",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1000, -100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst gaps = data.gapScores; // Expected: { 'gap_1': 5, 'gap_2': 3, ... }\nconst rows = [];\n\nfor (const [gapId, score] of Object.entries(gaps)) {\n  // Validate Likert scale 1-7\n  const numScore = Number(score);\n  if (numScore < 1 || numScore > 7 || !Number.isInteger(numScore)) {\n    continue; // Skip invalid scores\n  }\n  rows.push({\n    json: {\n      username: data.username,\n      surveyId: data.surveyId,\n      gapId: gapId,\n      score: numScore,\n      timestamp: data.timestamp,\n      subWorkingGroup: data.subWorkingGroup || 'UNKNOWN'\n    }\n  });\n}\n\nreturn rows;"
+      },
+      "id": "parse-gap-scores",
+      "name": "Parse Gap Scores (Likert 1-7)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [750, 100]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": "={{ $env.RESPONSES_SHEET_ID }}",
+        "sheetName": "SurveyResponses",
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        }
+      },
+      "id": "store-survey-responses",
+      "name": "Store Survey Responses",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1000, 100]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": "={{ $env.ARCHIVE_SHEET_ID }}",
+        "sheetName": "Archive",
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        }
+      },
+      "id": "archive-backup",
+      "name": "Archive to Long-Term Storage",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1250, 100]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.NOTIFICATION_FROM_EMAIL }}",
+        "toEmail": "={{ $('Validate & Sanitize Input').first().json.email }}",
+        "subject": "Thank You - Gap Analysis Survey Submitted",
+        "emailType": "html",
+        "html": "<h2>Submission Confirmed</h2><p>Dear {{ $('Validate & Sanitize Input').first().json.name }},</p><p>Thank you for completing the gap analysis survey. Your responses have been recorded.</p><p>Survey ID: {{ $('Validate & Sanitize Input').first().json.surveyId }}<br>Submitted: {{ $('Validate & Sanitize Input').first().json.timestamp }}</p><p>You will receive the final analysis report once all responses have been collected and processed.</p>"
+      },
+      "id": "send-thank-you",
+      "name": "Send Thank You Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1500, 0]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": "={{ $env.MASTER_ROSTER_SHEET_ID }}",
+        "sheetName": "Roster",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lastSurveyDate": "={{ $('Validate & Sanitize Input').first().json.timestamp }}",
+            "sendReminder": "NO"
+          }
+        },
+        "matchingColumns": ["username"]
+      },
+      "id": "update-roster-survey",
+      "name": "Update Roster - Survey Complete",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1500, 200]
+    }
+  ],
+  "connections": {
+    "Survey Submission Webhook": { "main": [[{ "node": "Validate & Sanitize Input", "type": "main", "index": 0 }]] },
+    "Validate & Sanitize Input": { "main": [[{ "node": "Demographics or Survey?", "type": "main", "index": 0 }]] },
+    "Demographics or Survey?": {
+      "main": [
+        [{ "node": "Store Demographics", "type": "main", "index": 0 }],
+        [{ "node": "Parse Gap Scores (Likert 1-7)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Store Demographics": { "main": [[{ "node": "Mark Demographics Complete", "type": "main", "index": 0 }]] },
+    "Mark Demographics Complete": { "main": [[{ "node": "Send Thank You Email", "type": "main", "index": 0 }]] },
+    "Parse Gap Scores (Likert 1-7)": { "main": [[{ "node": "Store Survey Responses", "type": "main", "index": 0 }]] },
+    "Store Survey Responses": { "main": [[{ "node": "Archive to Long-Term Storage", "type": "main", "index": 0 }, { "node": "Update Roster - Survey Complete", "type": "main", "index": 0 }]] },
+    "Archive to Long-Term Storage": { "main": [[{ "node": "Send Thank You Email", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}

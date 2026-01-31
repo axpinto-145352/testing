@@ -1,0 +1,133 @@
+{
+  "name": "Gap Analysis - Survey Lifecycle Manager",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 * * *"
+            }
+          ]
+        }
+      },
+      "id": "daily-check",
+      "name": "Daily Lifecycle Check",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": "={{ $env.SURVEY_CONFIG_SHEET_ID }}",
+        "sheetName": "ActiveSurvey",
+        "returnAll": true
+      },
+      "id": "get-surveys",
+      "name": "Get All Surveys",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [250, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const surveys = $input.all();\nconst now = new Date();\nconst results = [];\n\nfor (const survey of surveys) {\n  const s = survey.json;\n  const endDate = new Date(s.endDate);\n  const startDate = new Date(s.startDate);\n  \n  if (s.status === 'active' && now > endDate) {\n    results.push({ json: { ...s, action: 'close', reason: 'Survey period ended' } });\n  } else if (s.status === 'scheduled' && now >= startDate) {\n    results.push({ json: { ...s, action: 'activate', reason: 'Survey start date reached' } });\n  } else if (s.status === 'active') {\n    const daysLeft = Math.ceil((endDate - now) / (1000*60*60*24));\n    if (daysLeft <= 3) {\n      results.push({ json: { ...s, action: 'warn_closing', daysLeft, reason: `Survey closing in ${daysLeft} days` } });\n    }\n  }\n}\n\nreturn results.length > 0 ? results : [{ json: { action: 'none', reason: 'No lifecycle actions needed' } }];"
+      },
+      "id": "check-lifecycle",
+      "name": "Check Survey Lifecycle",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "close",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "route-action",
+      "name": "Route Lifecycle Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [750, 0]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": "={{ $env.SURVEY_CONFIG_SHEET_ID }}",
+        "sheetName": "ActiveSurvey",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": { "status": "closed" }
+        },
+        "matchingColumns": ["surveyId"]
+      },
+      "id": "close-survey",
+      "name": "Close Survey",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1000, -100]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.NOTIFICATION_FROM_EMAIL }}",
+        "toEmail": "={{ $env.ANALYST_EMAIL }}",
+        "subject": "Survey Closed - {{ $json.surveyName }} - Ready for Analysis",
+        "emailType": "html",
+        "html": "<h2>Survey Period Closed</h2><p>The survey <strong>{{ $json.surveyName }}</strong> (ID: {{ $json.surveyId }}) has been automatically closed.</p><p>All responses have been collected. Please proceed to the Power BI dashboard or trigger the report generator for analysis.</p><p><a href='{{ $env.DASHBOARD_URL }}'>Open Dashboard</a></p>"
+      },
+      "id": "notify-survey-closed",
+      "name": "Notify - Survey Closed",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1250, -100]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": "={{ $env.SURVEY_CONFIG_SHEET_ID }}",
+        "sheetName": "ActiveSurvey",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": { "status": "active" }
+        },
+        "matchingColumns": ["surveyId"]
+      },
+      "id": "activate-survey",
+      "name": "Activate Survey",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1000, 100]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.NOTIFICATION_FROM_EMAIL }}",
+        "toEmail": "={{ $env.ANALYST_EMAIL }}",
+        "subject": "Survey Closing Soon - {{ $json.surveyName }} - {{ $json.daysLeft }} days remaining",
+        "emailType": "html",
+        "html": "<h2>Survey Closing Soon</h2><p><strong>{{ $json.surveyName }}</strong> will close in {{ $json.daysLeft }} day(s).</p><p>Please ensure all participants have been reminded to complete their submissions.</p>"
+      },
+      "id": "warn-closing",
+      "name": "Warn - Survey Closing Soon",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1000, 300]
+    }
+  ],
+  "connections": {
+    "Daily Lifecycle Check": { "main": [[{ "node": "Get All Surveys", "type": "main", "index": 0 }]] },
+    "Get All Surveys": { "main": [[{ "node": "Check Survey Lifecycle", "type": "main", "index": 0 }]] },
+    "Check Survey Lifecycle": { "main": [[{ "node": "Route Lifecycle Action", "type": "main", "index": 0 }]] },
+    "Route Lifecycle Action": { "main": [[{ "node": "Close Survey", "type": "main", "index": 0 }], [{ "node": "Activate Survey", "type": "main", "index": 0 }], [{ "node": "Warn - Survey Closing Soon", "type": "main", "index": 0 }]] },
+    "Close Survey": { "main": [[{ "node": "Notify - Survey Closed", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true }
+}

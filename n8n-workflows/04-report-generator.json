@@ -1,0 +1,125 @@
+{
+  "name": "Gap Analysis - Consultancy Report Generator",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger (Analyst Initiates)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "gap-analysis/generate-report",
+        "authentication": "headerAuth"
+      },
+      "id": "webhook-trigger",
+      "name": "API Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 200]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": "={{ $env.ANALYTICS_SHEET_ID }}",
+        "sheetName": "DashboardSummary",
+        "returnAll": true
+      },
+      "id": "get-dashboard-data",
+      "name": "Get Dashboard Summary",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [300, 100]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": "={{ $env.ANALYTICS_SHEET_ID }}",
+        "sheetName": "GapRankings",
+        "returnAll": true
+      },
+      "id": "get-gap-rankings",
+      "name": "Get Gap Rankings",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": "={{ $env.ANALYTICS_SHEET_ID }}",
+        "sheetName": "FactorSummary",
+        "returnAll": true
+      },
+      "id": "get-factor-summary",
+      "name": "Get Factor Summary",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [300, 500]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": "={{ $env.ANALYTICS_SHEET_ID }}",
+        "sheetName": "TimeSeries",
+        "returnAll": true
+      },
+      "id": "get-time-series",
+      "name": "Get Time Series",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [300, 700]
+    },
+    {
+      "parameters": {
+        "jsCode": "const dashboard = $('Get Dashboard Summary').all();\nconst gaps = $('Get Gap Rankings').all();\nconst factors = $('Get Factor Summary').all();\nconst timeSeries = $('Get Time Series').all();\n\nconst now = new Date();\nconst reportDate = now.toISOString().split('T')[0];\n\n// Top 10 critical gaps\nconst topGaps = gaps.slice(0, 10).map((g, i) => \n  `| ${i+1} | ${g.json.gapName || g.json.gapId} | ${g.json.gapCategory} | ${g.json.mean} | ${g.json.npsScore} | ${g.json.count} |`\n).join('\\n');\n\n// Factor summary table\nconst factorTable = factors.map(f => \n  `| ${f.json.factor} | ${f.json.mean} | ${f.json.npsScore} | ${f.json.count} | ${f.json.pct_1}% | ${f.json.pct_2}% | ${f.json.pct_3}% | ${f.json.pct_4}% | ${f.json.pct_5}% | ${f.json.pct_6}% | ${f.json.pct_7}% |`\n).join('\\n');\n\n// Build the report markdown\nconst report = `# Gap Analysis Report\n## Executive Summary\n\n**Report Date:** ${reportDate}\n**Total Responses:** ${dashboard[0]?.json?.totalResponses || 'N/A'}\n**Unique Respondents:** ${dashboard[0]?.json?.uniqueRespondents || 'N/A'}\n**Survey Period:** [Auto-populated from survey config]\n\nThis report presents the findings from the most recent gap analysis survey cycle. Respondents evaluated capability gaps across multiple factors using a 7-point Likert scale (1 = Critical Gap, 7 = No Gap). The Net Priority Score (NPS) provides a weighted composite measure where lower scores indicate higher priority gaps requiring immediate attention.\n\n---\n\n## Methodology\n\n- **Survey Instrument:** 7-point Likert scale across ${gaps.length} identified capability gaps\n- **Scoring:** 1-3 = Detractor (critical gap), 4-5 = Passive (moderate), 6-7 = Promoter (minimal gap)\n- **NPS Calculation:** Weighted sum (1=-3, 2=-2, 3=-1, 4=0, 5=0, 6=+1, 7=+2)\n- **Demographics Filters:** Experience level, organizational background, current status, sub-working group\n\n---\n\n## Top 10 Priority Gaps\n\n| Rank | Gap | Category | Mean Score | NPS | Responses |\n|------|-----|----------|-----------|-----|----------|\n${topGaps}\n\n---\n\n## Factor Analysis\n\n| Factor | Mean | NPS | Count | 1 | 2 | 3 | 4 | 5 | 6 | 7 |\n|--------|------|-----|-------|---|---|---|---|---|---|---|\n${factorTable}\n\n---\n\n## Trend Analysis\n\n[Time series comparison across survey periods - populated when multiple survey cycles are available]\n\n---\n\n## Sub-Working Group Breakdown\n\n[Detailed breakdown by sub-working group with group-specific top gaps and recommendations]\n\n---\n\n## Recommendations\n\n1. **Immediate Action (NPS < -20):** Gaps scoring below -20 NPS require immediate resource allocation and intervention planning.\n2. **Monitor (NPS -20 to 0):** Gaps in this range should be tracked quarterly with assigned owners.\n3. **Maintain (NPS > 0):** Current capabilities are adequate; maintain existing investments.\n\n---\n\n## Appendix\n\n- Full gap listing with scores\n- Demographic distribution of respondents\n- Raw data tables\n- Methodology notes\n\n---\n\n*Report generated automatically by Gap Analysis Tool on ${now.toISOString()}*\n`;\n\nreturn [{ json: { report, reportDate, filename: `Gap_Analysis_Report_${reportDate}.md` } }];"
+      },
+      "id": "generate-report",
+      "name": "Generate Consultancy Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.NOTIFICATION_FROM_EMAIL }}",
+        "toEmail": "={{ $env.ANALYST_EMAIL }}",
+        "subject": "Gap Analysis Report Ready - {{ $json.reportDate }}",
+        "emailType": "html",
+        "html": "<h2>Gap Analysis Report Generated</h2><p>The latest gap analysis report has been generated and is ready for review.</p><p><strong>Date:</strong> {{ $json.reportDate }}</p><p>Please review the report in the shared analytics folder or access it through the dashboard.</p>"
+      },
+      "id": "notify-analyst",
+      "name": "Notify Analyst - Report Ready",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [950, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $('Generate Consultancy Report').first().json.report }}"
+      },
+      "id": "respond-webhook",
+      "name": "Return Report via API",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [950, 500]
+    }
+  ],
+  "connections": {
+    "Manual Trigger (Analyst Initiates)": { "main": [[{ "node": "Get Dashboard Summary", "type": "main", "index": 0 }, { "node": "Get Gap Rankings", "type": "main", "index": 0 }, { "node": "Get Factor Summary", "type": "main", "index": 0 }, { "node": "Get Time Series", "type": "main", "index": 0 }]] },
+    "API Trigger": { "main": [[{ "node": "Get Dashboard Summary", "type": "main", "index": 0 }, { "node": "Get Gap Rankings", "type": "main", "index": 0 }, { "node": "Get Factor Summary", "type": "main", "index": 0 }, { "node": "Get Time Series", "type": "main", "index": 0 }]] },
+    "Get Dashboard Summary": { "main": [[{ "node": "Generate Consultancy Report", "type": "main", "index": 0 }]] },
+    "Get Gap Rankings": { "main": [[{ "node": "Generate Consultancy Report", "type": "main", "index": 0 }]] },
+    "Get Factor Summary": { "main": [[{ "node": "Generate Consultancy Report", "type": "main", "index": 0 }]] },
+    "Get Time Series": { "main": [[{ "node": "Generate Consultancy Report", "type": "main", "index": 0 }]] },
+    "Generate Consultancy Report": { "main": [[{ "node": "Notify Analyst - Report Ready", "type": "main", "index": 0 }, { "node": "Return Report via API", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  }
+}

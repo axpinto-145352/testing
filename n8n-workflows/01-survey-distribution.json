@@ -1,0 +1,207 @@
+{
+  "name": "Gap Analysis - Survey Distribution & Reminders",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Weekly Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 200]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": "={{ $env.MASTER_ROSTER_SHEET_ID }}",
+        "sheetName": "Roster",
+        "returnAll": true
+      },
+      "id": "get-roster",
+      "name": "Get User Roster",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [250, 100],
+      "notes": "Pull master roster with columns: username, email, name, subWorkingGroup, demographicsComplete, lastSurveyDate, sendReminder, reminderScheduleDate"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": "={{ $env.SURVEY_CONFIG_SHEET_ID }}",
+        "sheetName": "ActiveSurvey",
+        "returnAll": true
+      },
+      "id": "get-survey-config",
+      "name": "Get Active Survey Config",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [250, 300],
+      "notes": "Pull active survey metadata: surveyId, surveyName, startDate, endDate, status, targetGroups, formUrl"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "active-survey-check",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "active",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "check-active-survey",
+      "name": "Is Survey Active?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": "={{ $env.RESPONSES_SHEET_ID }}",
+        "sheetName": "SurveyResponses",
+        "returnAll": true,
+        "filters": {
+          "column": "surveyId",
+          "value": "={{ $('Get Active Survey Config').item.json.surveyId }}"
+        }
+      },
+      "id": "get-existing-responses",
+      "name": "Get Existing Responses",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [750, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const roster = $('Get User Roster').all();\nconst responses = $('Get Existing Responses').all();\nconst surveyConfig = $('Get Active Survey Config').first();\n\nconst respondedUsernames = new Set(responses.map(r => r.json.username));\n\nconst now = new Date();\n\nconst needsReminder = roster.filter(user => {\n  // Skip if already responded\n  if (respondedUsernames.has(user.json.username)) return false;\n  \n  // Check if user is in target group for this survey\n  const targetGroups = surveyConfig.json.targetGroups.split(',').map(g => g.trim());\n  if (targetGroups.length > 0 && targetGroups[0] !== 'ALL') {\n    if (!targetGroups.includes(user.json.subWorkingGroup)) return false;\n  }\n  \n  // Check schedule-based sending\n  if (user.json.reminderScheduleDate) {\n    const schedDate = new Date(user.json.reminderScheduleDate);\n    if (schedDate > now) return false;\n  }\n  \n  return true;\n});\n\nconst completed = roster.filter(user => respondedUsernames.has(user.json.username));\n\nreturn [\n  { json: { type: 'reminder', users: needsReminder.map(u => u.json) } },\n  { json: { type: 'stats', total: roster.length, responded: completed.length, pending: needsReminder.length } }\n];"
+      },
+      "id": "filter-users",
+      "name": "Filter & Categorize Users",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "reminder",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "route-type",
+      "name": "Route by Type",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "users"
+      },
+      "id": "split-users",
+      "name": "Split Into Individual Users",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [1500, 100]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.NOTIFICATION_FROM_EMAIL }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "Action Required: Gap Analysis Survey - {{ $('Get Active Survey Config').first().json.surveyName }}",
+        "emailType": "html",
+        "html": "<h2>Gap Analysis Survey Reminder</h2><p>Dear {{ $json.name }},</p><p>This is a reminder to complete the <strong>{{ $('Get Active Survey Config').first().json.surveyName }}</strong> gap analysis survey.</p><p>As a member of the <strong>{{ $json.subWorkingGroup }}</strong> sub-working group, your input is critical to identifying and prioritizing capability gaps.</p><p><a href=\"{{ $('Get Active Survey Config').first().json.formUrl }}\" style=\"background-color:#1a56db;color:white;padding:12px 24px;text-decoration:none;border-radius:4px;display:inline-block;\">Complete Survey Now</a></p><p>Survey closes: {{ $('Get Active Survey Config').first().json.endDate }}</p><p>Thank you for your participation.</p>"
+      },
+      "id": "send-reminder-email",
+      "name": "Send Reminder Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1750, 100],
+      "notes": "Configure SMTP credentials for your environment. For classified systems, use approved internal mail relay."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": "={{ $env.MASTER_ROSTER_SHEET_ID }}",
+        "sheetName": "Roster",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lastReminderSent": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED"
+        },
+        "matchingColumns": ["username"]
+      },
+      "id": "update-reminder-log",
+      "name": "Log Reminder Sent",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2000, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const stats = $input.first().json;\nreturn [{ json: { text: `Survey Distribution Report:\\n- Total Users: ${stats.total}\\n- Responded: ${stats.responded}\\n- Pending Reminders Sent: ${stats.pending}\\n- Response Rate: ${((stats.responded / stats.total) * 100).toFixed(1)}%` } }];"
+      },
+      "id": "format-stats",
+      "name": "Format Stats Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 350]
+    }
+  ],
+  "connections": {
+    "Weekly Schedule Trigger": { "main": [[{ "node": "Get User Roster", "type": "main", "index": 0 }, { "node": "Get Active Survey Config", "type": "main", "index": 0 }]] },
+    "Manual Trigger": { "main": [[{ "node": "Get User Roster", "type": "main", "index": 0 }, { "node": "Get Active Survey Config", "type": "main", "index": 0 }]] },
+    "Get Active Survey Config": { "main": [[{ "node": "Is Survey Active?", "type": "main", "index": 0 }]] },
+    "Is Survey Active?": { "main": [[{ "node": "Get Existing Responses", "type": "main", "index": 0 }], []] },
+    "Get Existing Responses": { "main": [[{ "node": "Filter & Categorize Users", "type": "main", "index": 0 }]] },
+    "Filter & Categorize Users": { "main": [[{ "node": "Route by Type", "type": "main", "index": 0 }]] },
+    "Route by Type": { "main": [[{ "node": "Split Into Individual Users", "type": "main", "index": 0 }], [{ "node": "Format Stats Summary", "type": "main", "index": 0 }]] },
+    "Split Into Individual Users": { "main": [[{ "node": "Send Reminder Email", "type": "main", "index": 0 }]] },
+    "Send Reminder Email": { "main": [[{ "node": "Log Reminder Sent", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}
