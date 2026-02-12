@@ -15,6 +15,44 @@ A self-hosted n8n automation platform, containerized via Docker, delivering an e
 
 ---
 
+# Return on Investment
+
+## Quantified Benefits
+
+| Benefit | Current State | Future State | Annual Savings |
+|---------|---------------|--------------|----------------|
+| Analyst hours per survey cycle | 40 hours manual processing | 2 hours review only | 38 hrs × 4 cycles × $75/hr = **$11,400/yr** |
+| Power BI re-mapping incidents | ~6 incidents/year × 4 hrs each | Zero (PostgreSQL eliminates fragility) | 24 hrs × $75/hr = **$1,800/yr** |
+| Single operator risk | Unquantified but critical | Any trained operator can manage | Risk mitigation value |
+| Report generation | 8 hours per report | 15 minutes automated | 7.75 hrs × 4 cycles × $75/hr = **$2,325/yr** |
+| **Total Annual Savings** | | | **$15,525+/yr** |
+
+## Cost Avoidance
+
+| Item | Traditional Approach | Game Warden Approach | Savings |
+|------|---------------------|---------------------|---------|
+| Independent ATO for Yellow | $200,000 - $500,000 | Inherited via Game Warden | **$200K - $500K** |
+| ATO timeline | 6-18 months | Weeks | **6-12 months faster** |
+| Compliance staff augmentation | $150,000 - $300,000/yr | Included in platform fee | **Significant** |
+
+## Payback Analysis
+
+- **Black MVP investment:** $21.5K - $34.2K
+- **Annual operational savings:** $15,525+
+- **Payback period:** ~18-26 months on Black alone
+- **With ATO cost avoidance (Yellow):** Immediate positive ROI
+
+## Why Not Just Fix Power Automate?
+
+| Approach | Cost | Result |
+|----------|------|--------|
+| Improve existing Power Automate | ~$15,000 - $25,000 | Fixes symptoms, not root cause. Still fragile. No classified pathway. Still single-operator dependent. Dead end at IL4. |
+| Build on n8n (this proposal) | $21.5K - $34.2K (Black) | Eliminates root causes. Classified pathway via Game Warden. Operator-independent. Platform for 3-year growth. |
+
+The Power Automate path is false economy. It addresses symptoms while leaving fundamental fragility, operator dependency, and classification barriers in place.
+
+---
+
 # Current State vs. Proposed State
 
 ## Current Architecture
@@ -204,9 +242,26 @@ All components are open-source or self-hosted. No per-user licensing costs. No v
 
 ---
 
+# Client Dependencies (Critical Path)
+
+The following client deliverables are required to maintain the project timeline. Delays in any item will impact the schedule.
+
+| Deadline | Dependency | Owner | Impact if Missed |
+|----------|-----------|-------|------------------|
+| **Week -2** | AWS GovCloud credentials OR on-prem Docker host confirmed ready | Client IT | Blocks all deployment |
+| **Week -1** | Read access to all Power Automate flows, Power BI .pbix files, and source Excel data | Client | Blocks data migration |
+| **Week 1 Day 1** | SMTP relay credentials delivered | Client IT | Blocks email notifications |
+| **Week 4** | UAT test users designated with confirmed availability (5-10 users) | Client | Delays UAT |
+| **Week 5** | Feedback from initial testing provided | Client | Delays final adjustments |
+| **March Event -3 days** | Final sign-off for production use | Client | Blocks live deployment |
+
+**Note:** If any dependency is not met by its deadline, timeline will be adjusted accordingly. Recommend weekly status calls to track dependencies.
+
+---
+
 # Implementation Timeline
 
-## Phase 1: Black MVP — Weeks 1 through 6
+## Phase 1: Black MVP — Weeks 1 through 8 (includes 2-week buffer)
 | Week | Milestone | Deliverable |
 |------|-----------|-------------|
 | 1 | Onboarding & Setup | n8n deployed; data schema finalized; access provisioned |
@@ -214,9 +269,13 @@ All components are open-source or self-hosted. No per-user licensing costs. No v
 | 3 | Analytics Engine | Likert/NPS calculations; factor aggregation; dashboard data |
 | 4 | Report Generator | Auto-report and survey lifecycle automation |
 | 5 | Integration Testing | End-to-end test with sample data; Power BI connector |
-| 6 | UAT & Handoff | User acceptance testing with ~15 users at March event |
+| 6 | UAT Round 1 | Initial user acceptance testing with 5-10 users |
+| 7 | Refinement & Buffer | Address UAT feedback; contingency for blocked issues |
+| 8 | UAT Round 2 & Handoff | Final testing with ~15 users; March event deployment |
 
 **Milestone Gate:** Client reviews functional MVP. Green light to proceed or conclude.
+
+**Contingency:** If March event date is immovable and timeline compresses, MVP scope can be reduced to 3 core workflows (Survey Distribution, Form Submission, Basic Analytics) with Report Generator and Lifecycle Manager delivered post-event.
 
 ## Phase 2: Yellow Deployment — Weeks 7 through 12
 | Week | Milestone |

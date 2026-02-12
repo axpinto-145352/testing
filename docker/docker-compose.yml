@@ -2,48 +2,74 @@ version: '3.8'
 
 # Gap Analysis Tool - Production Docker Compose
 # Designed for CMMC compliance and classified network deployment
+# Updated based on multi-agent security review
 
 services:
+  # =============================================================================
+  # CORE APPLICATION SERVICES
+  # =============================================================================
+
   n8n:
     image: n8nio/n8n:1.74.2
     container_name: gap-analysis-n8n
     restart: unless-stopped
+    user: "1000:1000"  # Run as non-root for Iron Bank compliance
     environment:
       - N8N_HOST=${N8N_HOST:-localhost}
       - N8N_PORT=5678
       - N8N_PROTOCOL=https
       - WEBHOOK_URL=https://${N8N_HOST}/
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      # PostgreSQL for n8n metadata
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_DATABASE=n8n
       - DB_POSTGRESDB_USER=${POSTGRES_USER:-n8n}
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      # Authentication
       - N8N_BASIC_AUTH_ACTIVE=true
       - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-admin}
       - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      # Logging & Audit
       - N8N_LOG_LEVEL=info
       - N8N_LOG_OUTPUT=console,file
       - N8N_LOG_FILE_LOCATION=/home/node/.n8n/logs/n8n.log
       - EXECUTIONS_DATA_SAVE_ON_ERROR=all
       - EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
       - EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS=true
-      # Environment-specific variables
-      - MASTER_ROSTER_SHEET_ID=${MASTER_ROSTER_SHEET_ID}
-      - SURVEY_CONFIG_SHEET_ID=${SURVEY_CONFIG_SHEET_ID}
-      - RESPONSES_SHEET_ID=${RESPONSES_SHEET_ID}
-      - DEMOGRAPHICS_SHEET_ID=${DEMOGRAPHICS_SHEET_ID}
-      - ARCHIVE_SHEET_ID=${ARCHIVE_SHEET_ID}
-      - ANALYTICS_SHEET_ID=${ANALYTICS_SHEET_ID}
+      # Application Database Connection (for survey data)
+      - APP_DB_HOST=postgres
+      - APP_DB_PORT=5432
+      - APP_DB_NAME=gap_analysis
+      - APP_DB_USER=${POSTGRES_USER:-n8n}
+      - APP_DB_PASSWORD=${POSTGRES_PASSWORD}
+      # Email Configuration
       - NOTIFICATION_FROM_EMAIL=${NOTIFICATION_FROM_EMAIL}
       - ANALYST_EMAIL=${ANALYST_EMAIL}
       - DASHBOARD_URL=${DASHBOARD_URL}
+      # SMTP Configuration
+      - N8N_EMAIL_MODE=smtp
+      - N8N_SMTP_HOST=${SMTP_HOST}
+      - N8N_SMTP_PORT=${SMTP_PORT:-587}
+      - N8N_SMTP_USER=${SMTP_USER}
+      - N8N_SMTP_PASS=${SMTP_PASS}
+      - N8N_SMTP_SSL=${SMTP_SSL:-true}
     volumes:
       - n8n_data:/home/node/.n8n
       - n8n_logs:/home/node/.n8n/logs
     networks:
       - gap-analysis-internal
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,10 +88,19 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-n8n}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=n8n
+      - POSTGRES_MULTIPLE_DATABASES=n8n,gap_analysis
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro
     networks:
       - gap-analysis-internal
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-n8n}"]
       interval: 10s
@@ -83,28 +118,151 @@ services:
       - ./nginx/certs:/etc/nginx/certs:ro
     networks:
       - gap-analysis-internal
+      - default  # CRITICAL: Must be on default network to receive external traffic
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       n8n:
         condition: service_healthy
 
+  # =============================================================================
+  # MONITORING & OBSERVABILITY
+  # =============================================================================
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: gap-analysis-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - gap-analysis-internal
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    security_opt:
+      - no-new-privileges:true
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: gap-analysis-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=https://${N8N_HOST}/grafana
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - gap-analysis-internal
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - prometheus
+
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    container_name: gap-analysis-alertmanager
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    networks:
+      - gap-analysis-internal
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+    security_opt:
+      - no-new-privileges:true
+
+  # =============================================================================
+  # BACKUP & DISASTER RECOVERY
+  # =============================================================================
+
   backup:
     image: postgres:16-alpine
     container_name: gap-analysis-backup
+    restart: unless-stopped
     environment:
       - PGHOST=postgres
       - PGUSER=${POSTGRES_USER:-n8n}
       - PGPASSWORD=${POSTGRES_PASSWORD}
-      - PGDATABASE=n8n
+      - BACKUP_RETENTION_DAYS=30
+      - SMTP_HOST=${SMTP_HOST}
+      - ALERT_EMAIL=${ANALYST_EMAIL}
     volumes:
       - backup_data:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
     networks:
       - gap-analysis-internal
-    entrypoint: >
-      sh -c "while true; do
-        pg_dump -Fc > /backups/n8n_backup_$$(date +%Y%m%d_%H%M%S).dump;
-        find /backups -type f -mtime +30 -delete;
-        sleep 86400;
-      done"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Run backup every 24 hours with verification and alerting
+        while true; do
+          TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
+          BACKUP_FILE="/backups/gap_analysis_backup_$${TIMESTAMP}.dump"
+
+          echo "[$$TIMESTAMP] Starting backup..."
+
+          # Backup n8n database
+          pg_dump -Fc n8n > "/backups/n8n_backup_$${TIMESTAMP}.dump" 2>/tmp/backup_error.log
+          N8N_STATUS=$$?
+
+          # Backup gap_analysis database
+          pg_dump -Fc gap_analysis > "/backups/gap_analysis_backup_$${TIMESTAMP}.dump" 2>>/tmp/backup_error.log
+          APP_STATUS=$$?
+
+          # Verify backups
+          if [ $$N8N_STATUS -eq 0 ] && [ $$APP_STATUS -eq 0 ]; then
+            # Verify backup integrity
+            pg_restore -l "/backups/n8n_backup_$${TIMESTAMP}.dump" > /dev/null 2>&1
+            if [ $$? -eq 0 ]; then
+              echo "[$$TIMESTAMP] Backup completed and verified successfully"
+            else
+              echo "[$$TIMESTAMP] ERROR: Backup verification failed"
+            fi
+          else
+            echo "[$$TIMESTAMP] ERROR: Backup failed - check /tmp/backup_error.log"
+          fi
+
+          # Cleanup old backups
+          find /backups -type f -mtime +$${BACKUP_RETENTION_DAYS} -delete
+
+          # Sleep 24 hours
+          sleep 86400
+        done
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
     depends_on:
       postgres:
         condition: service_healthy
@@ -117,6 +275,12 @@ volumes:
   postgres_data:
     driver: local
   backup_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  alertmanager_data:
     driver: local
 
 networks:

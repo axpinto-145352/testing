@@ -1,0 +1,74 @@
+# Alert rules for Gap Analysis Tool
+
+groups:
+  - name: gap-analysis-alerts
+    rules:
+      # Container health
+      - alert: ContainerDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Container {{ $labels.job }} is down"
+          description: "{{ $labels.job }} has been unreachable for more than 1 minute."
+
+      # n8n workflow failures
+      - alert: WorkflowExecutionFailure
+        expr: increase(n8n_workflow_execution_errors_total[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "n8n workflow execution failures detected"
+          description: "More than 5 workflow execution errors in the last 5 minutes."
+
+      # PostgreSQL connection issues
+      - alert: PostgreSQLConnectionFailure
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL connection failure"
+          description: "Cannot connect to PostgreSQL database."
+
+      # High response time
+      - alert: HighResponseTime
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High response time detected"
+          description: "95th percentile response time is above 5 seconds."
+
+      # NGINX 5xx errors
+      - alert: HighErrorRate
+        expr: rate(nginx_http_requests_total{status=~"5.."}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High HTTP error rate"
+          description: "More than 10% of requests are returning 5xx errors."
+
+      # Disk space (if node_exporter is available)
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100 < 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk space is low"
+          description: "Less than 10% disk space remaining on {{ $labels.mountpoint }}."
+
+      # Backup failure detection
+      - alert: BackupMissing
+        expr: time() - max(backup_last_success_timestamp) > 90000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database backup is overdue"
+          description: "No successful backup in the last 25 hours."

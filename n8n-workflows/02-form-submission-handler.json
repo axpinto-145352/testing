@@ -20,13 +20,14 @@
     },
     {
       "parameters": {
-        "jsCode": "const body = $input.first().json.body;\n\n// Validate required fields\nconst required = ['username', 'surveyId', 'submissionType'];\nfor (const field of required) {\n  if (!body[field]) {\n    throw new Error(`Missing required field: ${field}`);\n  }\n}\n\n// Sanitize inputs - strip any HTML/script tags\nfunction sanitize(val) {\n  if (typeof val === 'string') {\n    return val.replace(/<[^>]*>/g, '').trim();\n  }\n  return val;\n}\n\nconst sanitized = {};\nfor (const [key, value] of Object.entries(body)) {\n  if (typeof value === 'object' && !Array.isArray(value)) {\n    sanitized[key] = {};\n    for (const [k, v] of Object.entries(value)) {\n      sanitized[key][k] = sanitize(v);\n    }\n  } else {\n    sanitized[key] = sanitize(value);\n  }\n}\n\nsanitized.timestamp = new Date().toISOString();\nsanitized.ipHash = require('crypto').createHash('sha256').update($input.first().json.headers['x-forwarded-for'] || 'unknown').digest('hex').substring(0, 16);\n\nreturn [{ json: sanitized }];"
+        "jsCode": "// =============================================================================\n// COMPREHENSIVE INPUT VALIDATION AND SANITIZATION\n// Addresses CMMC SI.L2-3.14.2 and OWASP security requirements\n// =============================================================================\n\nconst crypto = require('crypto');\nconst body = $input.first().json.body;\n\n// Validation schema definitions\nconst SCHEMAS = {\n  demographics: {\n    required: ['username', 'email', 'submissionType'],\n    optional: ['name', 'experience_years', 'org_type', 'current_status', 'sub_working_group', 'affiliations', 'skill_sets'],\n    validators: {\n      username: { type: 'string', pattern: /^[a-zA-Z0-9_.-]{3,64}$/, maxLength: 64 },\n      email: { type: 'string', pattern: /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/, maxLength: 255 },\n      name: { type: 'string', maxLength: 255 },\n      experience_years: { type: 'number', min: 0, max: 60 },\n      org_type: { type: 'enum', values: ['contractor', 'FBI', 'federal', 'military', 'other'] },\n      current_status: { type: 'enum', values: ['active_duty', 'contractor', 'federal', 'retired', 'other'] },\n      sub_working_group: { type: 'string', pattern: /^[a-zA-Z0-9_\\s-]{1,100}$/, maxLength: 100 },\n      affiliations: { type: 'string', maxLength: 1000 },\n      skill_sets: { type: 'string', maxLength: 1000 }\n    }\n  },\n  survey: {\n    required: ['username', 'surveyId', 'submissionType', 'gapScores'],\n    optional: ['subWorkingGroup', 'email'],\n    validators: {\n      username: { type: 'string', pattern: /^[a-zA-Z0-9_.-]{3,64}$/, maxLength: 64 },\n      surveyId: { type: 'string', pattern: /^[a-zA-Z0-9_-]{1,64}$/, maxLength: 64 },\n      subWorkingGroup: { type: 'string', pattern: /^[a-zA-Z0-9_\\s-]{1,100}$/, maxLength: 100 },\n      email: { type: 'string', pattern: /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/, maxLength: 255 },\n      gapScores: { type: 'object', validator: validateGapScores }\n    }\n  }\n};\n\n// Validate gap scores object\nfunction validateGapScores(scores) {\n  if (typeof scores !== 'object' || scores === null || Array.isArray(scores)) {\n    return { valid: false, error: 'gapScores must be an object' };\n  }\n  const validatedScores = {};\n  for (const [gapId, score] of Object.entries(scores)) {\n    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(gapId)) continue;\n    const numScore = Number(score);\n    if (!Number.isInteger(numScore) || numScore < 1 || numScore > 7) continue;\n    validatedScores[gapId] = numScore;\n  }\n  if (Object.keys(validatedScores).length === 0) {\n    return { valid: false, error: 'No valid gap scores provided' };\n  }\n  return { valid: true, value: validatedScores };\n}\n\n// Sanitize string - remove HTML, SQL injection patterns\nfunction sanitizeString(val, maxLength = 1000) {\n  if (typeof val !== 'string') return '';\n  return val\n    .replace(/<[^>]*>/g, '')\n    .replace(/[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]/g, '')\n    .replace(/['\"`;\\\\]/g, '')\n    .replace(/--/g, '')\n    .replace(/\\/\\*/g, '')\n    .trim()\n    .substring(0, maxLength);\n}\n\nfunction validateField(value, validator, fieldName) {\n  if (value === undefined || value === null || value === '') {\n    return { valid: true, value: null };\n  }\n  switch (validator.type) {\n    case 'string':\n      if (typeof value !== 'string') return { valid: false, error: `${fieldName} must be a string` };\n      const sanitized = sanitizeString(value, validator.maxLength || 255);\n      if (validator.pattern && !validator.pattern.test(sanitized)) {\n        return { valid: false, error: `${fieldName} format is invalid` };\n      }\n      return { valid: true, value: sanitized };\n    case 'number':\n      const num = Number(value);\n      if (isNaN(num)) return { valid: false, error: `${fieldName} must be a number` };\n      if (validator.min !== undefined && num < validator.min) return { valid: false, error: `${fieldName} must be at least ${validator.min}` };\n      if (validator.max !== undefined && num > validator.max) return { valid: false, error: `${fieldName} must be at most ${validator.max}` };\n      return { valid: true, value: num };\n    case 'enum':\n      const strVal = String(value).toLowerCase();\n      if (!validator.values.map(v => v.toLowerCase()).includes(strVal)) {\n        return { valid: false, error: `${fieldName} must be one of: ${validator.values.join(', ')}` };\n      }\n      return { valid: true, value: value };\n    case 'object':\n      return validator.validator ? validator.validator(value) : { valid: true, value: value };\n    default:\n      return { valid: true, value: value };\n  }\n}\n\nconst errors = [];\nconst submissionType = body.submissionType?.toLowerCase();\nif (!submissionType || !['demographics', 'survey'].includes(submissionType)) {\n  throw new Error('Invalid submissionType. Must be \"demographics\" or \"survey\".');\n}\n\nconst schema = SCHEMAS[submissionType];\nconst validated = {\n  submissionType: submissionType,\n  submissionId: crypto.randomUUID(),\n  timestamp: new Date().toISOString(),\n  ipHash: crypto.createHash('sha256')\n    .update($input.first().json.headers?.['x-forwarded-for'] || $input.first().json.headers?.['x-real-ip'] || 'unknown')\n    .digest('hex').substring(0, 16)\n};\n\nfor (const field of schema.required) {\n  if (body[field] === undefined || body[field] === null || body[field] === '') {\n    errors.push(`Missing required field: ${field}`);\n    continue;\n  }\n  const validator = schema.validators[field];\n  if (validator) {\n    const result = validateField(body[field], validator, field);\n    if (!result.valid) errors.push(result.error);\n    else validated[field] = result.value;\n  } else {\n    validated[field] = sanitizeString(String(body[field]));\n  }\n}\n\nfor (const field of schema.optional || []) {\n  if (body[field] !== undefined && body[field] !== null && body[field] !== '') {\n    const validator = schema.validators[field];\n    if (validator) {\n      const result = validateField(body[field], validator, field);\n      if (result.valid && result.value !== null) validated[field] = result.value;\n    } else {\n      validated[field] = sanitizeString(String(body[field]));\n    }\n  }\n}\n\nif (errors.length > 0) throw new Error(`Validation failed: ${errors.join('; ')}`);\nreturn [{ json: validated }];"
       },
       "id": "validate-sanitize",
       "name": "Validate & Sanitize Input",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [250, 0]
+      "position": [250, 0],
+      "notes": "Comprehensive validation: type checking, pattern matching, length limits, SQL injection prevention, HTML stripping"
     },
     {
       "parameters": {
@@ -48,113 +49,175 @@
     },
     {
       "parameters": {
-        "operation": "append",
-        "documentId": "={{ $env.DEMOGRAPHICS_SHEET_ID }}",
-        "sheetName": "Demographics",
-        "columns": {
-          "mappingMode": "autoMapInputData"
+        "operation": "executeQuery",
+        "query": "INSERT INTO users (username, email, name, experience_years, org_type, current_status, sub_working_group, affiliations, skill_sets, demographics_complete, demographics_date) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, NOW()) ON CONFLICT (username) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name, experience_years = EXCLUDED.experience_years, org_type = EXCLUDED.org_type, current_status = EXCLUDED.current_status, sub_working_group = EXCLUDED.sub_working_group, affiliations = EXCLUDED.affiliations, skill_sets = EXCLUDED.skill_sets, demographics_complete = TRUE, demographics_date = NOW(), updated_at = NOW() RETURNING id",
+        "options": {
+          "queryParams": "={{ [$('Validate & Sanitize Input').first().json.username, $('Validate & Sanitize Input').first().json.email, $('Validate & Sanitize Input').first().json.name || null, $('Validate & Sanitize Input').first().json.experience_years || null, $('Validate & Sanitize Input').first().json.org_type || null, $('Validate & Sanitize Input').first().json.current_status || null, $('Validate & Sanitize Input').first().json.sub_working_group || null, $('Validate & Sanitize Input').first().json.affiliations || null, $('Validate & Sanitize Input').first().json.skill_sets || null] }}"
         }
       },
       "id": "store-demographics",
-      "name": "Store Demographics",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.5,
+      "name": "Store Demographics (PostgreSQL)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
       "position": [750, -100],
-      "notes": "Demographics: username, experience_years, org_type (contractor/FBI/federal/military), current_status (active_duty/contractor/federal), sub_working_group, affiliations, skill_sets"
-    },
-    {
-      "parameters": {
-        "operation": "update",
-        "documentId": "={{ $env.MASTER_ROSTER_SHEET_ID }}",
-        "sheetName": "Roster",
-        "columns": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "demographicsComplete": "YES",
-            "demographicsDate": "={{ $json.timestamp }}"
-          }
-        },
-        "matchingColumns": ["username"]
+      "credentials": {
+        "postgres": "Gap Analysis DB"
       },
-      "id": "update-roster-demographics",
-      "name": "Mark Demographics Complete",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.5,
-      "position": [1000, -100]
+      "notes": "Uses UPSERT to handle both new users and updates. Stores in PostgreSQL, not Google Sheets."
     },
     {
       "parameters": {
-        "jsCode": "const data = $input.first().json;\nconst gaps = data.gapScores; // Expected: { 'gap_1': 5, 'gap_2': 3, ... }\nconst rows = [];\n\nfor (const [gapId, score] of Object.entries(gaps)) {\n  // Validate Likert scale 1-7\n  const numScore = Number(score);\n  if (numScore < 1 || numScore > 7 || !Number.isInteger(numScore)) {\n    continue; // Skip invalid scores\n  }\n  rows.push({\n    json: {\n      username: data.username,\n      surveyId: data.surveyId,\n      gapId: gapId,\n      score: numScore,\n      timestamp: data.timestamp,\n      subWorkingGroup: data.subWorkingGroup || 'UNKNOWN'\n    }\n  });\n}\n\nreturn rows;"
-      },
-      "id": "parse-gap-scores",
-      "name": "Parse Gap Scores (Likert 1-7)",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [750, 100]
-    },
-    {
-      "parameters": {
-        "operation": "append",
-        "documentId": "={{ $env.RESPONSES_SHEET_ID }}",
-        "sheetName": "SurveyResponses",
-        "columns": {
-          "mappingMode": "autoMapInputData"
+        "operation": "executeQuery",
+        "query": "INSERT INTO demographics_submissions (submission_id, username, experience_years, org_type, current_status, sub_working_group, affiliations, skill_sets, ip_hash) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "options": {
+          "queryParams": "={{ [$('Validate & Sanitize Input').first().json.submissionId, $('Validate & Sanitize Input').first().json.username, $('Validate & Sanitize Input').first().json.experience_years || null, $('Validate & Sanitize Input').first().json.org_type || null, $('Validate & Sanitize Input').first().json.current_status || null, $('Validate & Sanitize Input').first().json.sub_working_group || null, $('Validate & Sanitize Input').first().json.affiliations || null, $('Validate & Sanitize Input').first().json.skill_sets || null, $('Validate & Sanitize Input').first().json.ipHash] }}"
         }
       },
-      "id": "store-survey-responses",
-      "name": "Store Survey Responses",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.5,
+      "id": "audit-demographics",
+      "name": "Audit Log Demographics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1000, -100],
+      "credentials": {
+        "postgres": "Gap Analysis DB"
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM survey_responses WHERE username = $1 AND survey_id = $2 LIMIT 1",
+        "options": {
+          "queryParams": "={{ [$('Validate & Sanitize Input').first().json.username, $('Validate & Sanitize Input').first().json.surveyId] }}"
+        }
+      },
+      "id": "check-duplicate-submission",
+      "name": "Check Duplicate Submission",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [750, 100],
+      "credentials": {
+        "postgres": "Gap Analysis DB"
+      },
+      "notes": "Prevents duplicate survey submissions by same user for same survey"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.length || 0 }}",
+              "rightValue": "0",
+              "operator": { "type": "number", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "is-new-submission",
+      "name": "Is New Submission?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
       "position": [1000, 100]
     },
     {
       "parameters": {
-        "operation": "append",
-        "documentId": "={{ $env.ARCHIVE_SHEET_ID }}",
-        "sheetName": "Archive",
-        "columns": {
-          "mappingMode": "autoMapInputData"
+        "jsCode": "const data = $('Validate & Sanitize Input').first().json;\nconst gapScores = data.gapScores;\nconst rows = [];\n\nfor (const [gapId, score] of Object.entries(gapScores)) {\n  rows.push({\n    json: {\n      submissionId: data.submissionId,\n      username: data.username,\n      surveyId: data.surveyId,\n      gapId: gapId,\n      score: score,\n      subWorkingGroup: data.subWorkingGroup || null,\n      ipHash: data.ipHash\n    }\n  });\n}\n\nreturn rows;"
+      },
+      "id": "expand-gap-scores",
+      "name": "Expand Gap Scores to Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 50]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO survey_responses (submission_id, username, survey_id, gap_id, score, sub_working_group, ip_hash) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7) ON CONFLICT (username, survey_id, gap_id) DO NOTHING",
+        "options": {
+          "queryParams": "={{ [$json.submissionId, $json.username, $json.surveyId, $json.gapId, $json.score, $json.subWorkingGroup, $json.ipHash] }}"
         }
       },
-      "id": "archive-backup",
-      "name": "Archive to Long-Term Storage",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.5,
-      "position": [1250, 100]
+      "id": "store-survey-responses",
+      "name": "Store Survey Responses (PostgreSQL)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1500, 50],
+      "credentials": {
+        "postgres": "Gap Analysis DB"
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE users SET last_survey_date = NOW(), send_reminder = FALSE, updated_at = NOW() WHERE username = $1",
+        "options": {
+          "queryParams": "={{ [$('Validate & Sanitize Input').first().json.username] }}"
+        }
+      },
+      "id": "update-user-survey-status",
+      "name": "Update User Survey Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1750, 50],
+      "credentials": {
+        "postgres": "Gap Analysis DB"
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO audit_log (event_type, username, entity_type, entity_id, action, details, ip_hash) VALUES ('submission', $1, $2, $3, 'create', $4::jsonb, $5)",
+        "options": {
+          "queryParams": "={{ [$('Validate & Sanitize Input').first().json.username, $('Validate & Sanitize Input').first().json.submissionType, $('Validate & Sanitize Input').first().json.submissionType === 'survey' ? $('Validate & Sanitize Input').first().json.surveyId : $('Validate & Sanitize Input').first().json.username, JSON.stringify({submissionId: $('Validate & Sanitize Input').first().json.submissionId, timestamp: $('Validate & Sanitize Input').first().json.timestamp}), $('Validate & Sanitize Input').first().json.ipHash] }}"
+        }
+      },
+      "id": "audit-log",
+      "name": "Write Audit Log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2000, 0],
+      "credentials": {
+        "postgres": "Gap Analysis DB"
+      }
     },
     {
       "parameters": {
         "fromEmail": "={{ $env.NOTIFICATION_FROM_EMAIL }}",
         "toEmail": "={{ $('Validate & Sanitize Input').first().json.email }}",
-        "subject": "Thank You - Gap Analysis Survey Submitted",
+        "subject": "Thank You - Gap Analysis {{ $('Validate & Sanitize Input').first().json.submissionType === 'survey' ? 'Survey' : 'Demographics' }} Submitted",
         "emailType": "html",
-        "html": "<h2>Submission Confirmed</h2><p>Dear {{ $('Validate & Sanitize Input').first().json.name }},</p><p>Thank you for completing the gap analysis survey. Your responses have been recorded.</p><p>Survey ID: {{ $('Validate & Sanitize Input').first().json.surveyId }}<br>Submitted: {{ $('Validate & Sanitize Input').first().json.timestamp }}</p><p>You will receive the final analysis report once all responses have been collected and processed.</p>"
+        "html": "<h2>Submission Confirmed</h2><p>Dear {{ $('Validate & Sanitize Input').first().json.name || $('Validate & Sanitize Input').first().json.username }},</p><p>Thank you for completing the gap analysis {{ $('Validate & Sanitize Input').first().json.submissionType }}. Your responses have been recorded.</p><p><strong>Submission ID:</strong> {{ $('Validate & Sanitize Input').first().json.submissionId }}<br><strong>Submitted:</strong> {{ $('Validate & Sanitize Input').first().json.timestamp }}</p><p>You will receive the final analysis report once all responses have been collected and processed.</p>"
       },
       "id": "send-thank-you",
       "name": "Send Thank You Email",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
-      "position": [1500, 0]
+      "position": [2250, 0]
     },
     {
       "parameters": {
-        "operation": "update",
-        "documentId": "={{ $env.MASTER_ROSTER_SHEET_ID }}",
-        "sheetName": "Roster",
-        "columns": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "lastSurveyDate": "={{ $('Validate & Sanitize Input').first().json.timestamp }}",
-            "sendReminder": "NO"
-          }
-        },
-        "matchingColumns": ["username"]
+        "respondWith": "json",
+        "responseBody": "={{ { success: true, message: 'Submission recorded successfully', submissionId: $('Validate & Sanitize Input').first().json.submissionId } }}"
       },
-      "id": "update-roster-survey",
-      "name": "Update Roster - Survey Complete",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.5,
-      "position": [1500, 200]
+      "id": "respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2500, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: false, message: 'You have already submitted a response for this survey. If you need to update your responses, please contact the administrator.', existingSubmission: true } }}",
+        "options": {
+          "responseCode": 409
+        }
+      },
+      "id": "respond-duplicate",
+      "name": "Respond - Already Submitted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1250, 200],
+      "notes": "Returns 409 Conflict for duplicate submissions"
     }
   ],
   "connections": {
@@ -162,15 +225,24 @@
     "Validate & Sanitize Input": { "main": [[{ "node": "Demographics or Survey?", "type": "main", "index": 0 }]] },
     "Demographics or Survey?": {
       "main": [
-        [{ "node": "Store Demographics", "type": "main", "index": 0 }],
-        [{ "node": "Parse Gap Scores (Likert 1-7)", "type": "main", "index": 0 }]
+        [{ "node": "Store Demographics (PostgreSQL)", "type": "main", "index": 0 }],
+        [{ "node": "Check Duplicate Submission", "type": "main", "index": 0 }]
       ]
     },
-    "Store Demographics": { "main": [[{ "node": "Mark Demographics Complete", "type": "main", "index": 0 }]] },
-    "Mark Demographics Complete": { "main": [[{ "node": "Send Thank You Email", "type": "main", "index": 0 }]] },
-    "Parse Gap Scores (Likert 1-7)": { "main": [[{ "node": "Store Survey Responses", "type": "main", "index": 0 }]] },
-    "Store Survey Responses": { "main": [[{ "node": "Archive to Long-Term Storage", "type": "main", "index": 0 }, { "node": "Update Roster - Survey Complete", "type": "main", "index": 0 }]] },
-    "Archive to Long-Term Storage": { "main": [[{ "node": "Send Thank You Email", "type": "main", "index": 0 }]] }
+    "Store Demographics (PostgreSQL)": { "main": [[{ "node": "Audit Log Demographics", "type": "main", "index": 0 }]] },
+    "Audit Log Demographics": { "main": [[{ "node": "Write Audit Log", "type": "main", "index": 0 }]] },
+    "Check Duplicate Submission": { "main": [[{ "node": "Is New Submission?", "type": "main", "index": 0 }]] },
+    "Is New Submission?": {
+      "main": [
+        [{ "node": "Expand Gap Scores to Rows", "type": "main", "index": 0 }],
+        [{ "node": "Respond - Already Submitted", "type": "main", "index": 0 }]
+      ]
+    },
+    "Expand Gap Scores to Rows": { "main": [[{ "node": "Store Survey Responses (PostgreSQL)", "type": "main", "index": 0 }]] },
+    "Store Survey Responses (PostgreSQL)": { "main": [[{ "node": "Update User Survey Status", "type": "main", "index": 0 }]] },
+    "Update User Survey Status": { "main": [[{ "node": "Write Audit Log", "type": "main", "index": 0 }]] },
+    "Write Audit Log": { "main": [[{ "node": "Send Thank You Email", "type": "main", "index": 0 }]] },
+    "Send Thank You Email": { "main": [[{ "node": "Respond Success", "type": "main", "index": 0 }]] }
   },
   "settings": {
     "executionOrder": "v1",

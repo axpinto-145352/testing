@@ -1,0 +1,42 @@
+# Alertmanager configuration for Gap Analysis Tool
+
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: '${SMTP_HOST}:${SMTP_PORT}'
+  smtp_from: '${NOTIFICATION_FROM_EMAIL}'
+  smtp_auth_username: '${SMTP_USER}'
+  smtp_auth_password: '${SMTP_PASS}'
+
+route:
+  group_by: ['alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'default-receiver'
+  routes:
+    - match:
+        severity: critical
+      receiver: 'critical-receiver'
+      repeat_interval: 1h
+
+receivers:
+  - name: 'default-receiver'
+    email_configs:
+      - to: '${ANALYST_EMAIL}'
+        send_resolved: true
+        headers:
+          subject: '[Gap Analysis] {{ .Status | toUpper }} - {{ .CommonAnnotations.summary }}'
+
+  - name: 'critical-receiver'
+    email_configs:
+      - to: '${ANALYST_EMAIL}'
+        send_resolved: true
+        headers:
+          subject: '[CRITICAL] Gap Analysis Alert - {{ .CommonAnnotations.summary }}'
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname']
